@@ -84,6 +84,8 @@
       <button data-body="girl" class="on">Girl</button>
       <button data-body="boy">Boy</button>
     </div>
+    <span>Skin</span>
+    <select id="skinsel" title="active skin tone (reads assets/base/)"></select>
     <span class="chips" id="baseChips">…</span>
   </div>
 </header>
@@ -169,10 +171,11 @@
     <div class="row btnrow sendrow">
       <button id="gSendDiff" disabled>Send to Diff →</button>
       <button id="gSendChroma" disabled>Send to Chroma →</button>
-      <button id="gSetGreen" disabled>Set as ⟨body⟩ green</button>
+      <input type="text" id="gSkinName" placeholder="skin tone (empty = default)" style="width:170px" title="skin token for the saved base; empty saves the default (unsuffixed)" />
+      <button id="gSetGreen" disabled>Set as ⟨body⟩ green → base</button>
     </div>
     <div class="row btnrow">
-      <select id="gSaveCat"><option value="_generated" selected>_generated</option><option value="">assets root</option><option>hair</option><option>top</option><option>bottom</option><option>shoes</option></select>
+      <select id="gSaveCat"><option value="_generated" selected>_generated</option><option value="base">base</option><option value="">assets root</option><option>hair</option><option>top</option><option>bottom</option><option>shoes</option></select>
       <input type="text" id="gSaveName" value="dressed_01.png" style="width:200px" />
       <button id="gSaveBtn" disabled>Save</button>
       <span class="status" id="gSaveStatus"></span>
@@ -190,11 +193,11 @@
     <div class="row"><label>Edge softness <span class="val" id="cSoftV">0.08</span></label><input type="range" id="cSoft" min="0" max="0.5" step="0.005" value="0.08" /></div>
     <div class="row"><label>Despill <span class="val" id="cDespV">0.80</span></label><input type="range" id="cDesp" min="0" max="1" step="0.05" value="0.80" /></div>
     <hr style="border:0;border-top:1px solid #353b50;margin:14px 0" />
-    <div class="row btnrow sendrow"><button id="cSetCutout" disabled>Set &amp; save as ⟨body⟩ cutout</button></div>
+    <div class="row btnrow sendrow"><input type="text" id="cSkinName" placeholder="skin tone (empty = default)" style="width:170px" title="skin token for the saved base; empty saves the default (unsuffixed)" /><button id="cSetCutout" disabled>Set &amp; save as ⟨body⟩ cutout → base</button></div>
     <div class="row btnrow sendrow"><button id="cSendDiffBase" disabled>→ Diff base</button><button id="cSendDiffDress" disabled>→ Diff dressed</button></div>
     <div class="row btnrow">
-      <select id="cSaveCat"><option value="" selected>assets root</option><option>_generated</option></select>
-      <input type="text" id="cSaveName" value="base_girl.png" style="width:180px" />
+      <select id="cSaveCat"><option value="_generated" selected>_generated</option><option value="base">base</option><option value="">assets root</option></select>
+      <input type="text" id="cSaveName" value="cleaned_01.png" style="width:180px" />
       <button id="cSaveBtn" disabled>Save</button>
       <span class="status" id="cStatus"></span>
     </div>
@@ -305,9 +308,17 @@ const $ = id => document.getElementById(id);
 // ============================ shared state ============================
 const state = {
   body: 'girl',
+  skin: 'default',
   provider: 'openai',
-  bases: { girl:{green:null,cutout:null}, boy:{green:null,cutout:null} },
+  manifest: { girl:{}, boy:{} },           // {body:{skin:{green:bool,cutout:bool}}} from /api/bases
+  bases: { girl:{}, boy:{} },              // {body:{skin:{green:Image|null,cutout:Image|null}}}, lazily loaded
 };
+// ---- base naming / lookup (scheme: base_<body>[_<skin>][_green].png, default = unsuffixed) ----
+function baseName(body, skin, kind){ const s=(skin&&skin!=='default')?'_'+skin:''; return 'base_'+body+s+(kind==='green'?'_green':'')+'.png'; }
+function basePath(body, skin, kind){ return 'assets/base/'+baseName(body,skin,kind); }
+function baseSlot(body, skin){ const b=state.bases[body]||(state.bases[body]={}); return b[skin]||(b[skin]={green:null,cutout:null}); }
+function curBase(){ return baseSlot(state.body, state.skin); }
+function basePresent(body, skin){ return (state.manifest[body]||{})[skin]||{}; }
 
 // ---- utilities ----
 const containFit = o => Math.min(CW/(o.naturalWidth||o.width), CH/(o.naturalHeight||o.height));
@@ -356,10 +367,15 @@ function makeViewport(canvas, getSource, opts){
   function toSource(cx,cy){ const r=canvas.getBoundingClientRect(), k=ratio(); const mx=(cx-r.left)*k, my=(cy-r.top)*k; return { sx:(mx-ox)/scale, sy:(my-oy)/scale }; }
   return { draw, markDirty:()=>{ fitted=false; }, fit:()=>{ fitted=false; draw(); }, get scale(){return scale;}, ratio, toSource };
 }
-async function apiSave(b64, category, filename, statusEl){
+async function apiSave(b64, category, filename, statusEl, opts){
+  opts = opts || {};
+  const post = ov => fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({b64,category,filename,overwrite:ov})}).then(r=>r.json());
   try{
-    const r = await fetch('/api/save',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({b64,category,filename})});
-    const d = await r.json();
+    let d = await post(!!opts.overwrite);
+    if(d && d.exists){                                  // server refused: file already there
+      if(!confirm('Overwrite '+d.savedAs+'?')){ if(statusEl){ statusEl.textContent='save cancelled (exists)'; statusEl.className='status'; } return d; }
+      d = await post(true);
+    }
     if(statusEl){ statusEl.textContent = d.ok ? ('saved → '+d.savedAs) : ('✗ '+d.error); statusEl.className='status '+(d.ok?'ok':'err'); }
     return d;
   }catch(e){ if(statusEl){ statusEl.textContent='✗ '+e.message+' (server running?)'; statusEl.className='status err'; } }
@@ -377,25 +393,73 @@ function showTab(name){
 }
 $('tabs').addEventListener('click', e=>{ if(e.target.dataset.tab) showTab(e.target.dataset.tab); });
 
-// ============================ bases / body ============================
-$('bodyseg').addEventListener('click', e=>{
-  const b=e.target.dataset.body; if(!b) return;
+// ============================ bases / body / skin ============================
+$('bodyseg').addEventListener('click', e=>{ const b=e.target.dataset.body; if(b) setBody(b); });
+$('skinsel').addEventListener('change', e=> setSkin(e.target.value));
+
+async function setBody(b){
   state.body=b;
   [...$('bodyseg').children].forEach(c=>c.classList.toggle('on', c.dataset.body===b));
+  if(!basePresent(b, state.skin).green && !basePresent(b, state.skin).cutout) state.skin='default';  // carry over, else default
+  rebuildSkinSel(); await applySelection();
+}
+async function setSkin(s){ state.skin=s; rebuildSkinSel(); await applySelection(); }
+
+// reflect the active selection everywhere: load its images, refresh chips/dropdown/ghost, prefill skin fields, persist
+async function applySelection(){
+  await ensureBase(state.body, state.skin);
   updateBaseChips(); renderAlign();
-  $('cSaveName').value='base_'+b+'.png';
-});
+  const tok = state.skin==='default' ? '' : state.skin;
+  if($('gSkinName')) $('gSkinName').value=tok;
+  if($('cSkinName')) $('cSkinName').value=tok;
+  persist();
+}
+function skinList(body){
+  return Object.keys(state.manifest[body]||{}).sort((a,b)=> a==='default'?-1 : b==='default'?1 : a.localeCompare(b));
+}
+function rebuildSkinSel(){
+  const skins=skinList(state.body);
+  if(!skins.includes(state.skin)) skins.push(state.skin);   // keep current selectable even if file-less
+  $('skinsel').innerHTML = skins.map(s=>{ const m=basePresent(state.body,s);
+    return '<option value="'+s+'"'+(s===state.skin?' selected':'')+'>'+s+'  ['+(m.green?'g':'·')+(m.cutout?'c':'·')+']</option>'; }).join('');
+}
 function updateBaseChips(){
-  const mk = body => { const s=state.bases[body]; return body+': <b>green '+(s.green?'✓':'✗')+'</b> <b>cutout '+(s.cutout?'✓':'✗')+'</b>'; };
-  $('baseChips').innerHTML = mk('girl') + ' &nbsp;|&nbsp; ' + mk('boy');
+  const m=basePresent(state.body, state.skin);
+  $('baseChips').innerHTML = state.body+' / '+state.skin+': <b>green '+(m.green?'✓':'✗')+'</b> <b>cutout '+(m.cutout?'✓':'✗')+'</b>';
 }
 async function fetchBaseIfPresent(path){ try{ const r=await fetch(path,{cache:'no-store'}); if(!r.ok) return null; return await imgFromSrc(URL.createObjectURL(await r.blob())); }catch(_){ return null; } }
-async function loadBases(){
-  for(const body of ['girl','boy']){
-    state.bases[body].cutout = await fetchBaseIfPresent('assets/base_'+body+'.png');
-    state.bases[body].green  = await fetchBaseIfPresent('assets/_generated/base_'+body+'_green.png');
-  }
-  updateBaseChips(); renderAlign();
+async function ensureBase(body, skin){                       // lazily fetch the images the manifest says exist
+  const m=basePresent(body, skin), slot=baseSlot(body, skin);
+  if(m.cutout && !slot.cutout) slot.cutout=await fetchBaseIfPresent(basePath(body,skin,'cutout'));
+  if(m.green  && !slot.green ) slot.green =await fetchBaseIfPresent(basePath(body,skin,'green'));
+}
+async function loadManifest(){
+  try{ const r=await fetch('/api/bases',{cache:'no-store'}); const d=await r.json(); if(d&&d.ok&&d.bases) state.manifest=d.bases; }catch(_){}
+}
+async function initBases(){
+  await loadManifest();
+  if(state.body!=='girl'&&state.body!=='boy') state.body='girl';
+  const m=basePresent(state.body, state.skin);
+  if(!m.green && !m.cutout) state.skin='default';            // validate persisted skin against disk
+  [...$('bodyseg').children].forEach(c=>c.classList.toggle('on', c.dataset.body===state.body));
+  rebuildSkinSel(); await applySelection();
+}
+// normalize a typed skin token: '' / 'default' -> default; reject reserved/illegal (returns false)
+function normSkin(raw, statusEl){
+  const s=(raw||'').trim().toLowerCase().replace(/\s+/g,'');
+  if(s===''||s==='default') return 'default';
+  const fail=msg=>{ if(statusEl){ statusEl.textContent='✗ '+msg; statusEl.className='status err'; } return false; };
+  if(s==='green') return fail("'green' is reserved (green-screen suffix)");
+  if(!/^[a-z0-9-]+$/.test(s)) return fail('skin tone must be a-z 0-9 - only');
+  return s;
+}
+// after a successful base write: set in memory, re-read manifest, auto-select the tone
+async function commitBase(body, skin, kind, img){
+  baseSlot(body, skin)[kind]=img;
+  await loadManifest();
+  state.body=body; state.skin=skin;
+  [...$('bodyseg').children].forEach(c=>c.classList.toggle('on', c.dataset.body===body));
+  rebuildSkinSel(); await applySelection();
 }
 
 // ============================ GENERATE ============================
@@ -438,7 +502,7 @@ async function setGenInput(b64){
 $('pickImg').onclick=()=>$('fileImg').click();
 $('fileImg').onchange=e=>{ const f=e.target.files[0]; if(!f) return; readB64(f,b=>setGenInput(b)); e.target.value=''; };
 $('clearImg').onclick=()=>setGenInput(null);
-$('useBaseImg').onclick=()=>{ const g=state.bases[state.body].green; if(!g){ alert('No green source for '+state.body+' yet. Generate a base and "Set as green", or place assets/_generated/base_'+state.body+'_green.png.'); return; } setGenInput(canvasB64(imgToCanvas(g))); };
+$('useBaseImg').onclick=()=>{ const g=curBase().green; if(!g){ alert('No green source for '+state.body+'/'+state.skin+' yet. Generate a base and "Set as green", or place assets/base/'+baseName(state.body,state.skin,'green')+'.'); return; } setGenInput(canvasB64(imgToCanvas(g))); };
 
 $('gFit').onclick=()=>{ gvp.markDirty(); gvp.draw(genMaskOverlay); };
 function rectFromPts(a,b){ if(!a||!b||!gmask.inputImg) return null;
@@ -513,18 +577,18 @@ function gstat(html,cls){ const s=$('gstatus'); s.innerHTML=html; s.className="s
 
 $('gSendDiff').onclick=async()=>{
   diff.dressImg = await imgFromB64(genResultB64);
-  const g=state.bases[state.body].green;
-  if(g) diff.baseImg=g; else $('dDim').textContent='No green base for '+state.body+' — set the base slot manually.';
+  const g=curBase().green;
+  if(g) diff.baseImg=g; else $('dDim').textContent='No green base for '+state.body+'/'+state.skin+' — set the base slot manually.';
   markSlot('base', !!diff.baseImg); markSlot('dress', true);
   showTab('diff');
 };
-$('gSendChroma').onclick=async()=>{ setChromaSrc(await imgFromB64(genResultB64)); $('cSaveName').value = genKind==='base' ? ('base_'+state.body+'.png') : (genKind==='garment' ? 'outfit_worn_01.png' : 'cleaned_01.png'); $('cSaveCat').value = genKind==='base' ? '' : '_generated'; showTab('chroma'); };
+$('gSendChroma').onclick=async()=>{ setChromaSrc(await imgFromB64(genResultB64)); $('cSaveName').value = genKind==='base' ? baseName(state.body,state.skin,'cutout') : (genKind==='garment' ? 'outfit_worn_01.png' : 'cleaned_01.png'); $('cSaveCat').value='_generated'; showTab('chroma'); };
+// Set as <body> green: name the tone (empty = default), set in memory + commit to assets/base/ (server confirms on overwrite)
 $('gSetGreen').onclick=async()=>{
-  const img=await imgFromB64(genResultB64);
-  const norm=normalizedCanvas(imgToCanvas(img));
-  state.bases[state.body].green=await imgFromSrc(norm.toDataURL());
-  updateBaseChips();
-  await apiSave(canvasB64(norm),'_generated','base_'+state.body+'_green.png',$('gSaveStatus'));
+  const skin=normSkin($('gSkinName').value, $('gSaveStatus')); if(skin===false) return;
+  const norm=normalizedCanvas(imgToCanvas(await imgFromB64(genResultB64)));
+  const d=await apiSave(canvasB64(norm),'base',baseName(state.body,skin,'green'),$('gSaveStatus'));
+  if(d&&d.ok) await commitBase(state.body, skin, 'green', await imgFromSrc(norm.toDataURL()));
 };
 $('gSaveBtn').onclick=()=> genResultB64 && apiSave(genResultB64,$('gSaveCat').value,$('gSaveName').value.trim(),$('gSaveStatus'));
 
@@ -576,9 +640,10 @@ function renderChroma(){
 $('cSendDiffBase').onclick=async()=>{ await setDiffImg('base', await imgFromSrc(normalizedCanvas(chroma.work).toDataURL())); showTab('diff'); };
 $('cSendDiffDress').onclick=async()=>{ await setDiffImg('dress', await imgFromSrc(normalizedCanvas(chroma.work).toDataURL())); showTab('diff'); };
 $('cSetCutout').onclick=async()=>{
+  const skin=normSkin($('cSkinName').value, $('cStatus')); if(skin===false) return;
   const norm=normalizedCanvas(chroma.work);
-  state.bases[state.body].cutout=await imgFromSrc(norm.toDataURL()); updateBaseChips(); renderAlign();
-  await apiSave(canvasB64(norm),'','base_'+state.body+'.png',$('cStatus'));
+  const d=await apiSave(canvasB64(norm),'base',baseName(state.body,skin,'cutout'),$('cStatus'));
+  if(d&&d.ok) await commitBase(state.body, skin, 'cutout', await imgFromSrc(norm.toDataURL()));
 };
 $('cSaveBtn').onclick=()=> chroma.srcImg && apiSave(canvasB64(normalizedCanvas(chroma.work)),$('cSaveCat').value,$('cSaveName').value.trim(),$('cStatus'));
 
@@ -596,7 +661,7 @@ document.querySelectorAll('#tab-diff .slot').forEach(s=>{
 $('dFile').onchange=async e=>{ const f=e.target.files[0]; if(f&&diff.pending){ await setDiffImg(diff.pending, await fileToImg(f)); } };
 async function setDiffImg(which,img){ if(which==='base') diff.baseImg=img; else diff.dressImg=img; markSlot(which,true); dvp.markDirty(); renderDiff(); }
 function markSlot(which,ok){ const slot= which==='base'?$('dSlotBase'):$('dSlotDress'); const img= which==='base'?diff.baseImg:diff.dressImg; slot.classList.toggle('ok',!!ok); if(img) slot.innerHTML=(which==='base'?'base ✓<br>':'dressed ✓<br>')+(img.naturalWidth||img.width)+'×'+(img.naturalHeight||img.height); }
-$('dUseGreen').onclick=()=>{ const g=state.bases[state.body].green; if(!g){ $('dDim').textContent='No green base for '+state.body+'.'; return; } setDiffImg('base',g); };
+$('dUseGreen').onclick=()=>{ const g=curBase().green; if(!g){ $('dDim').textContent='No green base for '+state.body+'/'+state.skin+'.'; return; } setDiffImg('base',g); };
 ['dThr','dSpk','dSft','dBr','dBp','dEr','dEp'].forEach(id=>$(id).addEventListener('input',()=>{dReflect();renderDiff();}));
 $('dHoles').addEventListener('change',renderDiff);
 function dReflect(){ $('dThrV').textContent=$('dThr').value; $('dSpkV').textContent=$('dSpk').value; $('dSftV').textContent=$('dSft').value; $('dBrV').textContent=$('dBr').value; $('dBpV').textContent=$('dBp').value; $('dErV').textContent=$('dEr').value; $('dEpV').textContent=$('dEp').value; }
@@ -803,7 +868,7 @@ window.addEventListener('mouseup',()=>aDrag=false);
 function drawLayerInto(ctx,L){ const w=(L.img.naturalWidth||L.img.width)*L.baseFit*L.scale, h=(L.img.naturalHeight||L.img.height)*L.baseFit*L.scale; const x=(CW-w)/2+L.dx, y=(CH-h)/2+L.dy; ctx.drawImage(L.img,x,y,w,h); return {x,y,w,h}; }
 function renderAlign(){
   asctx.clearRect(0,0,CW,CH);
-  const base=state.bases[state.body].cutout;
+  const base=curBase().cutout;
   if(base){ asctx.globalAlpha=align.op; const s=containFit(base); asctx.drawImage(base,(CW-(base.naturalWidth||base.width)*s)/2,(CH-(base.naturalHeight||base.height)*s)/2,(base.naturalWidth||base.width)*s,(base.naturalHeight||base.height)*s); asctx.globalAlpha=1; }
   let selBox=null;
   align.layers.slice().sort(byZ).forEach(L=>{ if(!L.visible)return; const box=drawLayerInto(asctx,L); if(align.sel&&align.sel.id===L.id) selBox=box; });
@@ -813,13 +878,13 @@ window.addEventListener('resize',()=>{ if($('tab-align').classList.contains('act
 $('aSaveBtn').onclick=()=>{ if(!align.sel)return; const c=document.createElement('canvas'); c.width=CW;c.height=CH; drawLayerInto(c.getContext('2d'),align.sel); apiSave(canvasB64(c),$('aSaveCat').value,$('aSaveName').value.trim(),$('aStatus')); };
 
 // ============================ persistence + init ============================
-function persist(){ const s={provider:state.provider}; [...PARTS,...SETTINGS,'gSaveName','gSaveCat'].forEach(k=>s[k]=$(k).value); localStorage.setItem('avatar_tools',JSON.stringify(s)); }
-function restore(){ try{ const s=JSON.parse(localStorage.getItem('avatar_tools')||"null"); if(s){ Object.keys(s).forEach(k=>{ if($(k)!=null)$(k).value=s[k]; }); setProvider(s.provider); return true; } }catch(_){} return false; }
+function persist(){ const s={provider:state.provider, body:state.body, skin:state.skin}; [...PARTS,...SETTINGS,'gSaveName','gSaveCat'].forEach(k=>s[k]=$(k).value); localStorage.setItem('avatar_tools',JSON.stringify(s)); }
+function restore(){ try{ const s=JSON.parse(localStorage.getItem('avatar_tools')||"null"); if(s){ Object.keys(s).forEach(k=>{ if($(k)!=null)$(k).value=s[k]; }); setProvider(s.provider); if(s.body) state.body=s.body; if(s.skin) state.skin=s.skin; return true; } }catch(_){} return false; }
 
 if(!restore()){ $('preset').value='outfit'; $('applyPreset').click(); }
 compose(); modeNote(); cReflect(); dReflect(); renderAlignList(); updateBaseChips();
 updateGenMaskUI(); gvp.draw(genMaskOverlay);
-loadBases();
+initBases();
 </script>
 </body>
 </html>

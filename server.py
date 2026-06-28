@@ -28,7 +28,7 @@ RUNWAY_BASE    = "https://api.dev.runwayml.com"
 RUNWAY_VERSION = "2024-11-06"
 
 # Whitelisted save destinations under assets/. "" = assets/ root (for base_*.png).
-SAVE_CATEGORIES = {"", "_generated", "hair", "top", "bottom", "shoes"}
+SAVE_CATEGORIES = {"", "_generated", "base", "hair", "top", "bottom", "shoes"}
 
 def load_env_keys(names):
     """Pull ONLY the named keys out of verse/.env. Nothing else is read or exposed."""
@@ -287,6 +287,35 @@ def safe_name(name, default="output.png"):
     return name
 
 
+def scan_bases():
+    """List assets/base/ into {body:{skin:{green,cutout}}}.
+
+    Filename scheme: base_<body>[_<skin>][_green].png.
+    Unsuffixed (no skin token) == the 'default' tone; '_green' marks the
+    green-screen source, otherwise the file is a transparent cutout.
+    """
+    grid = {"girl": {}, "boy": {}}
+    base_dir = os.path.join(ASSETS_DIR, "base")
+    try:
+        names = os.listdir(base_dir)
+    except OSError:
+        return grid
+    for name in names:
+        if not (name.startswith("base_") and name.lower().endswith(".png")):
+            continue
+        stem = name[len("base_"):-len(".png")]
+        kind = "cutout"
+        if stem.endswith("_green"):
+            kind = "green"; stem = stem[:-len("_green")]
+        parts = stem.split("_", 1)
+        body = parts[0]
+        if body not in grid:
+            continue
+        skin = parts[1] if len(parts) > 1 and parts[1] else "default"
+        grid[body].setdefault(skin, {"green": False, "cutout": False})[kind] = True
+    return grid
+
+
 def resolve_save_dir(category):
     """Map a whitelisted category to a directory under assets/, path-checked."""
     category = (category or "").strip().strip("/")
@@ -315,6 +344,8 @@ class Handler(BaseHTTPRequestHandler):
     # ---- static files ----
     def do_GET(self):
         path = urllib.parse.urlparse(self.path).path
+        if path == "/api/bases":
+            self._json(200, {"ok": True, "bases": scan_bases()}); return
         if path == "/":
             path = "/index.html"
         rel = posixpath.normpath(path).lstrip("/")
@@ -362,11 +393,14 @@ class Handler(BaseHTTPRequestHandler):
             elif path == "/api/save":
                 png = decode_png_b64(payload.get("b64"))         # validate before touching disk
                 save_dir = resolve_save_dir(payload.get("category"))
-                os.makedirs(save_dir, exist_ok=True)
                 name = safe_name(payload.get("filename"))
-                with open(os.path.join(save_dir, name), "wb") as f:
+                dest = os.path.join(save_dir, name)
+                rel = os.path.relpath(dest, BASE_DIR).replace(os.sep, "/")
+                if os.path.exists(dest) and not payload.get("overwrite"):
+                    self._json(200, {"ok": False, "exists": True, "savedAs": rel}); return
+                os.makedirs(save_dir, exist_ok=True)
+                with open(dest, "wb") as f:
                     f.write(png)
-                rel = os.path.relpath(os.path.join(save_dir, name), BASE_DIR).replace(os.sep, "/")
                 self._json(200, {"ok": True, "savedAs": rel})
 
             else:

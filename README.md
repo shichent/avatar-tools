@@ -1,7 +1,8 @@
 # Avatar Asset Prompt Guide
 
-Lightweight, API-only pipeline for a 2D layered paper-doll avatar (one boy + one
-girl canonical body, plus swappable hair / top / bottom / shoes). No local models.
+Lightweight, API-only pipeline for a 2D layered paper-doll avatar (a boy and a
+girl body in any number of skin tones, plus swappable hair / top / bottom /
+shoes). No local models.
 
 Everything lives in one app — `index.html` — served by `server.py`. The five tabs
 (**Generate · Chroma · Diff · Brush · Align**) share state and hand artifacts to each
@@ -22,9 +23,17 @@ directly won't work.
 ## Header controls (apply to all tabs)
 
 - **Girl / Boy toggle** — the active body. Diff and Align read it automatically.
-- **Base chips** — show, per body, whether the `green` source and `cutout`
-  (transparent) versions are loaded. Bases auto-load on startup from
-  `assets/base_<body>.png` (cutout) and `assets/_generated/base_<body>_green.png`.
+- **Skin dropdown** — the active skin tone for that body. Body+skin is a global
+  selection that persists across tabs *and* reloads. Switching body keeps the
+  current skin token if that body has it, otherwise falls back to `default`. Each
+  option is tagged `[gc]` for which halves exist on disk (`g`=green, `c`=cutout;
+  `·`=missing) — incomplete tones are still selectable so you can build the
+  missing half.
+- **Base chip** — the active `body / skin` pair's `green ✓ / cutout ✗` status.
+
+The dropdown is built from a server **manifest** (`GET /api/bases`, which lists
+`assets/base/`), so dropping a new `base_<body>_<skin>.png` in and reloading makes
+that tone appear with no code change. Bases auto-load lazily from `assets/base/`.
 
 ## Hard conventions (do not vary)
 
@@ -42,11 +51,15 @@ Each body is **two** images:
 
 | Version | What | Used by | File |
 |---|---|---|---|
-| **green** | the on-green base (opaque) | Generate input · Diff *base* slot | `assets/_generated/base_<body>_green.png` |
-| **cutout** | the keyed transparent base | Align ghost / body layer | `assets/base_<body>.png` |
+| **green** | the on-green base (opaque) | Generate input · Diff *base* slot | `assets/base/base_<body>[_<skin>]_green.png` |
+| **cutout** | the keyed transparent base | Align ghost / body layer | `assets/base/base_<body>[_<skin>].png` |
 
 The green source is what makes the diff cancel; the cutout is what you actually
-layer the avatar on.
+layer the avatar on. Both halves of every tone live together in `assets/base/`.
+The `default` tone is the **unsuffixed** file (`base_girl.png`); `_green` is the
+green-screen suffix, so no skin may be named `green` (or `default`). Skin tones
+are **strict recolors** — identical silhouette — so a diff/cutout stays valid
+across tones.
 
 ---
 
@@ -114,12 +127,22 @@ edits** endpoint; **no image → generations** endpoint.
 
 ## Workflows (with the auto-chain buttons)
 
-**Build the two bases**
+**Build a base (any body + skin tone)**
 
 ```
-Generate [Girl base] -> Set as girl green -> Send to Chroma -> Set & save girl cutout
-Generate [Boy edit] (attach girl green) -> Send to Chroma -> Set & save boy cutout
+pick Body + Skin in the header   (or type a new tone into the skin field below)
+Generate [Girl base] -> type the skin tone -> Set as green → base  (writes assets/base/)
+   -> Send to Chroma -> type the skin tone -> Set & save cutout → base
+Generate [Boy edit] (attach a green) -> Send to Chroma -> Set & save cutout → base
 ```
+
+The **Set as … → base** buttons take a skin-tone name (prefilled with the active
+tone; empty = `default`), write straight into `assets/base/`, set it in memory for
+a live ghost, and then re-read the manifest and auto-select the new tone. Saving
+over an existing file asks for confirmation first. Everywhere *else*, the **Save**
+row defaults to `_generated` (switch it to `base` by hand only when you deliberately
+mean to mint a base) and also confirms before overwriting — so `assets/base/` only
+ever changes on purpose.
 
 **Dress-on-body outfit (primary)**
 
@@ -147,8 +170,9 @@ Generate [Outfit only (no body)] -> Send to Chroma -> key out green
   two transparent versions. The diff is **alpha-aware**, so it still catches garment
   pixels when colours are close.
 
-Reusing girl outfits on the boy: switch the header to **Boy** and nudge in Align;
-save a boy-specific variant if needed.
+Reusing outfits across bodies/tones: change **Body** and/or **Skin** in the header
+and nudge in Align; the ghost follows the active `body / skin`. Save a body- or
+tone-specific variant if needed.
 
 ---
 
@@ -169,8 +193,11 @@ the selected layer — pan with **right/middle-drag**).
 
 ## Naming conventions
 
-- transparent cutout body: `assets/base_<body>.png`
-- on-green source body: `assets/_generated/base_<body>_green.png`
+- transparent cutout body: `assets/base/base_<body>[_<skin>].png`
+- on-green source body: `assets/base/base_<body>[_<skin>]_green.png`
+- the `default` tone is unsuffixed (`base_girl.png`, `base_girl_green.png`); a
+  named tone adds a `<skin>` token (`base_girl_brown.png`,
+  `base_girl_brown_green.png`). `green` / `default` are reserved tokens.
 - raw generations: auto-archived to `assets/_generated/<timestamp>.png`
 - garments: `assets/<category>/<cat>_NN.png` (`top_01.png`, `hair_01.png`, …)
 
